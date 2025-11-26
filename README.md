@@ -2,10 +2,9 @@
 ### *AI-Powered Fact Verification Platform for Real-Time Crisis Response*
 
 [![Live Demo](https://img.shields.io/badge/Try%20Now-Live%20App-green?style=for-the-badge&logo=vercel)](https://truthspotter.vercel.app)
-[![Next.js](https://img.shields.io/badge/Frontend-Next.js-black?logo=nextdotjs&style=for-the-badge)]()
+[![React.js](https://img.shields.io/badge/Frontend-React.js-black?logo=nextdotjs&style=for-the-badge)]()
 [![Node.js](https://img.shields.io/badge/Backend-Node.js-green?logo=node.js&style=for-the-badge)]()
 [![Supabase](https://img.shields.io/badge/Auth%20%26%20DB-Supabase-3FCF8E?logo=supabase&style=for-the-badge)]()
-[![PostgreSQL](https://img.shields.io/badge/Database-PostgreSQL-blue?logo=postgresql&style=for-the-badge)]()
 [![LangChain](https://img.shields.io/badge/AI%20Pipeline-LangChain-000?logo=openai&style=for-the-badge)]()
 
 ---

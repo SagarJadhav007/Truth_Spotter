@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { MisinformationDetector, VerificationResult } from './detector';
 import rateLimit from 'express-rate-limit';
+import { AgenticRAGVerifier } from './agentic';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -32,11 +33,15 @@ const verifyLimiter = rateLimit({
 
 // Initialize detector
 let detector: MisinformationDetector;
+let agenticVerifier : AgenticRAGVerifier;
 
 async function initializeDetector() {
   try {
     detector = new MisinformationDetector();
     await detector.initializeVectorStore();
+
+    agenticVerifier = new AgenticRAGVerifier(detector);
+    console.log('✅ Agentic RAG verifier initialized');
     console.log('✅ Misinformation detector initialized');
   } catch (error) {
     console.error('❌ Failed to initialize detector:', error);
@@ -253,6 +258,89 @@ app.get('/stats', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to get statistics'
+    });
+  }
+});
+
+// SSE STREAMING ENDPOINT
+app.get("/verify-stream", async (req, res) => {
+  const claim = req.query.claim as string;
+  if (!claim) return res.status(400).json({ error: "claim required" });
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.flushHeaders?.();
+
+  const send = (event: string, data: any) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const verifier = new AgenticRAGVerifier(detector, (msg) => send("step", msg));
+
+  try {
+    const result = await verifier.verifyClaimAgentic(claim);
+    send("final", result);
+  } catch (e: any) {
+    send("error", { message: e?.message || "verification failed" });
+  } finally {
+    res.end();
+  }
+
+  // Ensure a response is always returned
+  return res;
+});
+
+
+// Agentic RAG verification endpoint
+app.post('/verify-claim-agentic', verifyLimiter, async (req, res) => {
+  try {
+    const { claim } = req.body;
+
+    // Validation
+    if (!claim || typeof claim !== 'string' || claim.trim().length === 0) {
+      return res.status(400).json({
+        error: 'Invalid claim',
+        message: 'Claim must be a non-empty string'
+      });
+    }
+
+    if (claim.length > 1000) {
+      return res.status(400).json({
+        error: 'Claim too long',
+        message: 'Claim must be less than 1000 characters'
+      });
+    }
+
+    console.log(`🤖 API: Agentic verification for claim: "${claim.substring(0, 100)}..."`);
+
+    const startTime = Date.now();
+    const result = await agenticVerifier.verifyClaimAgentic(claim.trim());
+    const processingTime = Date.now() - startTime;
+
+    return res.json({
+      success: true,
+      data: {
+        claim: claim.trim(),
+        verification: result,
+        metadata: {
+          processingTimeMs: processingTime,
+          timestamp: new Date().toISOString(),
+          evidenceCount: result.evidence.length,
+          verificationType: 'agentic-rag',
+          agentsUsed: ['claim_analyst', 'evidence_researcher', 'fact_checker', 'synthesizer']
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error in agentic verification:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Agentic verification failed',
+      message: 'An error occurred while verifying the claim using agentic approach'
     });
   }
 });

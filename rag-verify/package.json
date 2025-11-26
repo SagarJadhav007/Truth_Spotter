@@ -22,10 +22,13 @@
   "author": "Your Name",
   "license": "MIT",
   "dependencies": {
+    "@ai-sdk/google": "^1.0.0",
     "@google/generative-ai": "^0.24.1",
     "@langchain/core": "^0.2.36",
     "@langchain/google-genai": "^0.0.26",
     "@langchain/qdrant": "^0.0.5",
+    "@openai/agents": "^1.0.0",
+    "@openai/agents-extensions": "^1.0.0",
     "@qdrant/js-client-rest": "^1.9.0",
     "axios": "^1.7.7",
     "cors": "^2.8.5",
@@ -35,7 +38,8 @@
     "langchain": "^0.2.20",
     "serpapi": "^2.0.0",
     "typescript": "^5.5.4",
-    "zod": "^3.25.76"
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.23.5"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

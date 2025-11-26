@@ -56,7 +56,7 @@ export const verifyClaim = async (
         "No summary available.",
       sources: (verification.evidence || []).map((e: any) => ({
         title: e.title || "Untitled Source",
-        source: e.source?.name || "Unknown Source",
+        source: e.source || "Unknown Source",
         description: e.snippet || "No description available.",
         reliability: e.reliability || 80,
         url: e.link || e.url || "",

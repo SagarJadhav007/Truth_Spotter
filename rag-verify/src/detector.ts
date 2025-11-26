@@ -45,14 +45,14 @@ class MisinformationDetector {
   private textSplitter: RecursiveCharacterTextSplitter;
 
   constructor() {
-    if (!process.env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is required');
+    if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY) throw new Error('GOOGLE_GENERATIVE_AI_API_KEY is required');
     if (!process.env.QDRANT_URL || !process.env.QDRANT_API_KEY)
       throw new Error('QDRANT_URL and QDRANT_API_KEY are required');
 
-    this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    this.genAI = new GoogleGenerativeAI(process.env.GOOGLE_GENERATIVE_AI_API_KEY);
 
     this.embeddings = new GoogleGenerativeAIEmbeddings({
-      apiKey: process.env.GEMINI_API_KEY,
+      apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
       modelName: 'text-embedding-004',
     });
 
@@ -73,11 +73,11 @@ class MisinformationDetector {
   async initializeVectorStore(collectionName: string = 'news_articles'): Promise<void> {
     try {
       const collections = await this.qdrantClient.getCollections();
-      const collectionExists = collections.collections.some(col => col.name === collectionName);
+      const collectionExists = collections.collections.some((col: any) => col.name === collectionName);
 
       if (!collectionExists) {
         await this.qdrantClient.createCollection(collectionName, {
-          vectors: { size: 768, distance: 'Cosine' },
+          vectors: { size: this.getEmbeddingDimension(), distance: 'Cosine' },
         });
       }
 
@@ -164,9 +164,45 @@ class MisinformationDetector {
   }
 
   // ==============================
-  // SAFE JSON PARSER
+  // PUBLIC HELPER: JSON TASK RUNNER
   // ==============================
-  private extractJsonFromResponse(response: string): any {
+  async runJsonTask(prompt: string, config?: { maxOutputTokens?: number; temperature?: number }): Promise<any> {
+    const model = this.genAI.getGenerativeModel({
+      model: 'gemini-2.0-flash',
+      generationConfig: {
+        maxOutputTokens: config?.maxOutputTokens ?? 800,
+        temperature: config?.temperature ?? 0.15,
+      },
+    });
+
+    try {
+      const response = await this.safeGenerate(model, prompt);
+      return this.extractJsonFromResponse(response);
+    } catch (error) {
+      console.error('❌ Error in JSON task:', error);
+      throw error;
+    }
+  }
+
+  // ==============================
+  // PUBLIC HELPER: GET EMBEDDING DIMENSION
+  // ==============================
+  getEmbeddingDimension(): number {
+    // text-embedding-004 uses 768 dimensions
+    return 768;
+  }
+
+  // ==============================
+  // PUBLIC HELPER: CHECK VECTOR STORE STATUS
+  // ==============================
+  isVectorStoreInitialized(): boolean {
+    return this.vectorStore !== null;
+  }
+
+  // ==============================
+  // PUBLIC HELPER: SAFE JSON PARSER
+  // ==============================
+  extractJsonFromResponse(response: string): any {
     try {
       return JSON.parse(response);
     } catch {
@@ -197,9 +233,9 @@ class MisinformationDetector {
   }
 
   // ==============================
-  // SAFE MODEL GENERATION (RETRY)
+  // PUBLIC HELPER: SAFE MODEL GENERATION (RETRY)
   // ==============================
-  private async safeGenerate(model: GenerativeModel, prompt: string, retries = 2): Promise<string> {
+  async safeGenerate(model: GenerativeModel, prompt: string, retries = 2): Promise<string> {
     for (let i = 0; i <= retries; i++) {
       try {
         const result = await model.generateContent(prompt);

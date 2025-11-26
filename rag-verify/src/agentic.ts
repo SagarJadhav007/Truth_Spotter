@@ -49,7 +49,7 @@ class AgenticRAGVerifier {
     this.detector = detector;
     this.onUpdate = onUpdate;
     this.llm = new ChatGoogleGenerativeAI({
-      apiKey: process.env.GEMINI_API_KEY,
+      apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY as string,
       modelName: 'gemini-2.5-flash',
       temperature: 0.3,
       maxOutputTokens: 1500,

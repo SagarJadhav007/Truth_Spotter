@@ -44,8 +44,36 @@ Instead of just labeling something as *true or false*, it provides **transparent
 **Frontend:** Next.js, React, ShadCN UI, Lucide Icons  
 **Backend:** Node.js, Express, PostgreSQL, LangChain  
 **Storage & Auth:** Supabase  
-**AI Layer:** Retrieval-Augmented Generation (RAG) + LLM reasoning  
+**AI Layer:** Retrieval-Augmented Generation (RAG) + OpenAI Agents SDK with Gemini  
 **Deployment:** Vercel  
+
+---
+
+## 🔐 Environment Variables
+
+### Backend (`rag-verify`)
+
+Required environment variables:
+
+- `GOOGLE_GENERATIVE_AI_API_KEY` - Google Gemini API key (used for both agents and embeddings)
+- `QDRANT_URL` - Qdrant vector database URL
+- `QDRANT_API_KEY` - Qdrant API key for authentication
+- `SERPAPI_KEY` - SerpAPI key for Google News search
+- `PORT` - Server port (default: 3000)
+
+### Frontend (`chatwiz-next`)
+
+- `VITE_API_URL` - Backend API URL (default: `http://localhost:3000`)
+
+Create a `.env` file in the `rag-verify` directory with these variables:
+
+```env
+GOOGLE_GENERATIVE_AI_API_KEY=your_gemini_api_key_here
+QDRANT_URL=your_qdrant_url
+QDRANT_API_KEY=your_qdrant_api_key
+SERPAPI_KEY=your_serpapi_key
+PORT=3000
+```
 
 ---
 

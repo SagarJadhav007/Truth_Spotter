@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { MisinformationDetector, VerificationResult } from './detector';
 import rateLimit from 'express-rate-limit';
-import { AgenticRAGVerifier } from './agentic';
+import { AgentOrchestrator } from './agent-orchestrator';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -33,16 +33,14 @@ const verifyLimiter = rateLimit({
 
 // Initialize detector
 let detector: MisinformationDetector;
-let agenticVerifier : AgenticRAGVerifier;
 
 async function initializeDetector() {
   try {
     detector = new MisinformationDetector();
     await detector.initializeVectorStore();
 
-    agenticVerifier = new AgenticRAGVerifier(detector);
-    console.log('✅ Agentic RAG verifier initialized');
     console.log('✅ Misinformation detector initialized');
+    console.log('✅ Agent orchestrator ready (will be created per request)');
   } catch (error) {
     console.error('❌ Failed to initialize detector:', error);
     process.exit(1);
@@ -278,10 +276,15 @@ app.get("/verify-stream", async (req, res) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   };
 
-  const verifier = new AgenticRAGVerifier(detector, (msg) => send("step", msg));
+  // Handle client disconnect
+  req.on("close", () => {
+    res.end();
+  });
+
+  const orchestrator = new AgentOrchestrator(detector, (msg) => send("step", msg));
 
   try {
-    const result = await verifier.verifyClaimAgentic(claim);
+    const result = await orchestrator.verifyClaimAgentic(claim);
     send("final", result);
   } catch (e: any) {
     send("error", { message: e?.message || "verification failed" });
@@ -317,7 +320,8 @@ app.post('/verify-claim-agentic', verifyLimiter, async (req, res) => {
     console.log(`🤖 API: Agentic verification for claim: "${claim.substring(0, 100)}..."`);
 
     const startTime = Date.now();
-    const result = await agenticVerifier.verifyClaimAgentic(claim.trim());
+    const orchestrator = new AgentOrchestrator(detector);
+    const result = await orchestrator.verifyClaimAgentic(claim.trim());
     const processingTime = Date.now() - startTime;
 
     return res.json({

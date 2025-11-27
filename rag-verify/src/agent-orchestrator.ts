@@ -6,7 +6,6 @@ import { Document } from '@langchain/core/documents';
 import { createAgentTools } from './agent-tools';
 import { createAgents } from './agents';
 
-
 // ==============================
 // TYPES
 // ==============================
@@ -51,6 +50,8 @@ export class AgentOrchestrator {
   };
   private searchQueries: string[] = [];
   private evidenceDocs: Document[] = [];
+  private isRunning: boolean = false;
+  private timeoutMs: number = 120000; // 2 minutes timeout
 
   constructor(detector: MisinformationDetector, onUpdate?: UpdateCallback) {
     this.detector = detector;
@@ -70,25 +71,34 @@ export class AgentOrchestrator {
   }
 
   private mapEvidenceToNewsArticles(docs: Document[]): NewsArticle[] {
-    return docs.slice(0, 8).map((doc) => ({
+    // Limit to prevent memory issues
+    return docs.slice(0, 5).map((doc) => ({
       title: (doc.metadata as any)?.title ?? (doc.metadata as any)?.source ?? 'Untitled source',
-      snippet: (doc.pageContent || '').slice(0, 200) + '...',
+      snippet: (doc.pageContent || '').slice(0, 150) + '...',
       link: (doc.metadata as any)?.link ?? undefined,
       date: (doc.metadata as any)?.date ?? 'Unknown date',
       source: (doc.metadata as any)?.source ?? 'Unknown',
     }));
   }
 
-  private extractSearchQueries(text: string): string[] {
-    // Try to extract search queries from agent output
-    const queryMatches = text.match(/query[:\s]+["']?([^"'\n]+)["']?/gi);
-    if (queryMatches) {
-      return queryMatches.map((m) => m.replace(/query[:\s]+["']?/i, '').replace(/["']$/, '').trim());
+  private cleanup() {
+    // Clear large objects to free memory
+    this.evidenceDocs = [];
+    this.searchQueries = [];
+    this.isRunning = false;
+    
+    // Force garbage collection if available
+    if (global.gc) {
+      global.gc();
     }
-    return [];
   }
 
   async verifyClaimAgentic(claim: string): Promise<AgenticVerificationResult> {
+    if (this.isRunning) {
+      throw new Error('Verification already in progress');
+    }
+
+    this.isRunning = true;
     this.step(`🤖 Starting Agentic Verification`);
     this.step(`📌 Claim: "${claim}"`);
 
@@ -102,99 +112,17 @@ export class AgentOrchestrator {
     this.searchQueries = [];
     this.evidenceDocs = [];
 
+    // Create timeout promise
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('Verification timeout')), this.timeoutMs);
+    });
+
     try {
-      // Create tools and agents
-      const tools = createAgentTools(this.detector);
-      const agents = createAgents(this.model, tools);
-
-      // Start with claim analyst agent
-      this.step(`🔍 Stage 1 — Claim Analyst running...`);
-
-      // Track agent outputs
-      let synthesisResult: any = null;
-
-      // Run the agent workflow using the run function
-      // The run function will automatically handle handoffs between agents
-      this.step(`🔍 Running agent workflow...`);
+      // Run with timeout
+      const verificationPromise = this.runVerification(claim);
+      const result = await Promise.race([verificationPromise, timeoutPromise]);
       
-      const result = await run(agents.claimAnalyst, claim);
-
-      // Extract final output
-      const finalResult = result.finalOutput || result.output || result;
-      
-      // Try to extract agent insights from the result
-      // Since we can't intercept intermediate steps easily, we'll parse from final output
-      if (finalResult) {
-        const resultStr = typeof finalResult === 'string' ? finalResult : JSON.stringify(finalResult);
-        
-        // Try to extract synthesis JSON
-        try {
-          const jsonMatch = resultStr.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            synthesisResult = JSON.parse(jsonMatch[0]);
-            this.step(`✅ Synthesizer completed`);
-          }
-        } catch (e) {
-          // Will handle in fallback
-        }
-        
-        // Store insights (we'll use the final result as synthesizer output)
-        this.agentInsights.synthesizer = resultStr;
-        this.step(`🎯 Final result received`);
-      }
-
-      // If synthesis didn't parse, try to extract from final result
-      if (!synthesisResult && finalResult) {
-        try {
-          const resultStr = typeof finalResult === 'string' ? finalResult : JSON.stringify(finalResult);
-          const jsonMatch = resultStr.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            synthesisResult = JSON.parse(jsonMatch[0]);
-          }
-        } catch (e) {
-          // Fallback below
-        }
-      }
-
-      // Retrieve evidence for final result
-      this.evidenceDocs = await this.detector.findRelevantEvidence(claim, 15);
-
-      // Build final result
-      const mappedEvidence = this.mapEvidenceToNewsArticles(this.evidenceDocs);
-
-      // Parse synthesis result or use fallback
-      if (synthesisResult) {
-        return {
-          isVerified: Boolean(synthesisResult.isVerified),
-          confidence: Number(synthesisResult.confidence ?? 50),
-          riskLevel: (synthesisResult.riskLevel as 'LOW' | 'MEDIUM' | 'HIGH') ?? 'MEDIUM',
-          factCheckSummary:
-            synthesisResult.factCheckSummary ||
-            'No clear conclusion available based on the current evidence.',
-          analysis:
-            synthesisResult.analysis ||
-            'Analysis generated from the combined outputs of claim analyst, evidence researcher, and fact checker.',
-          evidence: mappedEvidence,
-          agentInsights: this.agentInsights,
-          searchQueries: this.searchQueries.length > 0 ? this.searchQueries : ['No queries extracted'],
-          evidenceSources: this.evidenceDocs.length,
-        };
-      }
-
-      // Fallback if synthesis failed
-      this.step(`⚠️ Synthesis parsing failed, using fallback`);
-      return {
-        isVerified: false,
-        confidence: 50,
-        riskLevel: 'MEDIUM',
-        factCheckSummary:
-          'Evidence is inconclusive at this time. The claim should be treated as unverified and handled with caution.',
-        analysis: 'Fallback synthesis executed due to an error in parsing the synthesis result.',
-        evidence: mappedEvidence,
-        agentInsights: this.agentInsights,
-        searchQueries: this.searchQueries.length > 0 ? this.searchQueries : ['No queries extracted'],
-        evidenceSources: this.evidenceDocs.length,
-      };
+      return result;
     } catch (error: any) {
       this.step(`❌ Error in agentic verification: ${error?.message || 'Unknown error'}`);
       console.error('❌ Agentic verification error:', error);
@@ -212,7 +140,82 @@ export class AgentOrchestrator {
         searchQueries: this.searchQueries,
         evidenceSources: this.evidenceDocs.length,
       };
+    } finally {
+      this.cleanup();
+    }
+  }
+
+  private async runVerification(claim: string): Promise<AgenticVerificationResult> {
+    try {
+      // Create tools and agents with memory limits
+      const tools = createAgentTools(this.detector);
+      const agents = createAgents(this.model, tools);
+
+      this.step(`🔍 Stage 1 — Claim Analyst running...`);
+
+      // Simplified approach: Use direct LLM calls instead of full agent framework
+      // to reduce memory overhead
+      
+      // Stage 1: Analyze claim
+      const analysis = await this.detector.analyzeClaim(claim);
+      this.agentInsights.claimAnalyst = `Extracted ${analysis.extractedClaims.length} sub-claims and ${analysis.keywords.length} keywords`;
+      this.step(`✅ Claim Analyst completed`);
+
+      // Stage 2: Search and gather evidence (limit to 3 queries max)
+      this.step(`📚 Stage 2 — Evidence Researcher running...`);
+      const searchQueries = analysis.keywords.slice(0, 3);
+      this.searchQueries = searchQueries;
+      
+      let allArticles: NewsArticle[] = [];
+      for (const query of searchQueries.slice(0, 2)) { // Limit to 2 queries
+        const articles = await this.detector.fetchGoogleNewsSearch(query);
+        allArticles.push(...articles.slice(0, 3)); // Limit articles per query
+        
+        if (articles.length > 0) {
+          await this.detector.storeNewsArticles(articles.slice(0, 3));
+        }
+        
+        // Small delay to prevent rate limits
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      
+      this.step(`✅ Evidence Researcher completed`);
+
+      // Stage 3: Retrieve relevant evidence (limit to 5 docs)
+      this.step(`🔎 Stage 3 — Finding relevant evidence...`);
+      this.evidenceDocs = await this.detector.findRelevantEvidence(claim, 5);
+      this.step(`✅ Retrieved ${this.evidenceDocs.length} evidence documents`);
+
+      // Stage 4: Fact checking via direct LLM call
+      this.step(`⚖️ Stage 4 — Fact Checker running...`);
+      const verification = await this.detector.verifyClaimWithEvidence(
+        claim,
+        this.evidenceDocs,
+        analysis
+      );
+      this.agentInsights.factChecker = `Verdict: ${verification.isVerified ? 'SUPPORTED' : 'REFUTED/INCONCLUSIVE'}`;
+      this.step(`✅ Fact Checker completed`);
+
+      // Build final result
+      const mappedEvidence = this.mapEvidenceToNewsArticles(this.evidenceDocs);
+
+      const finalResult: AgenticVerificationResult = {
+        isVerified: verification.isVerified,
+        confidence: verification.confidence,
+        riskLevel: verification.riskLevel,
+        factCheckSummary: verification.factCheckSummary,
+        analysis: verification.analysis,
+        evidence: mappedEvidence,
+        agentInsights: this.agentInsights,
+        searchQueries: this.searchQueries,
+        evidenceSources: this.evidenceDocs.length,
+      };
+
+      this.step(`🎯 Verification complete`);
+      return finalResult;
+
+    } catch (error: any) {
+      throw new Error(`Verification failed: ${error?.message || 'Unknown error'}`);
     }
   }
 }
-

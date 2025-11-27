@@ -4,6 +4,8 @@ import { MisinformationDetector, VerificationResult } from './detector';
 import rateLimit from 'express-rate-limit';
 import { AgentOrchestrator } from './agent-orchestrator';
 
+console.log('🚀 Starting application...');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -16,43 +18,68 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+console.log('✅ Middleware configured');
+
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
+  windowMs: 15 * 60 * 1000,
+  max: 100,
   message: 'Too many requests from this IP, please try again later.'
 });
 app.use(limiter);
 
-// Stricter rate limiting for verification endpoint
 const verifyLimiter = rateLimit({
-  windowMs: 5 * 60 * 1000, // 5 minutes
-  max: 10, // limit each IP to 10 verification requests per 5 minutes
+  windowMs: 5 * 60 * 1000,
+  max: 10,
   message: 'Too many verification requests, please try again later.'
 });
 
+console.log('✅ Rate limiting configured');
+
 // Initialize detector
 let detector: MisinformationDetector;
+let isInitialized = false;
 
 async function initializeDetector() {
   try {
+    console.log('📦 Initializing detector...');
     detector = new MisinformationDetector();
+    
+    console.log('🔗 Connecting to vector store...');
     await detector.initializeVectorStore();
 
+    isInitialized = true;
     console.log('✅ Misinformation detector initialized');
     console.log('✅ Agent orchestrator ready (will be created per request)');
-  } catch (error) {
-    console.error('❌ Failed to initialize detector:', error);
-    process.exit(1);
+  } catch (error: any) {
+    console.error('❌ Failed to initialize detector:', error.message);
+    console.error('Stack:', error.stack);
+    throw error;
   }
+}
+
+// Middleware to check if detector is initialized
+function checkInitialized(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+): express.Response | void {
+  if (!isInitialized) {
+    return res.status(503).json({
+      success: false,
+      error: 'Service initializing',
+      message: 'The service is still initializing. Please try again in a few moments.'
+    });
+  }
+  return next();
 }
 
 // Routes
 
-// Health check
+// Health check (works even during initialization)
 app.get('/health', (req, res) => {
   res.json({ 
-    status: 'healthy', 
+    status: isInitialized ? 'healthy' : 'initializing', 
     timestamp: new Date().toISOString(),
     service: 'misinformation-detector-api'
   });
@@ -63,8 +90,11 @@ app.get('/', (req, res) => {
   res.json({
     name: 'Misinformation Detection API',
     version: '1.0.0',
+    status: isInitialized ? 'ready' : 'initializing',
     endpoints: {
       'POST /verify-claim': 'Verify a claim against news sources',
+      'POST /verify-claim-agentic': 'Verify using agentic approach',
+      'GET /verify-stream': 'Stream verification results (SSE)',
       'POST /update-news': 'Update news database with topics',
       'GET /health': 'Health check',
       'GET /stats': 'Get system statistics'
@@ -73,7 +103,7 @@ app.get('/', (req, res) => {
 });
 
 // Verify claim endpoint
-app.post('/verify-claim', verifyLimiter, async (req, res) => {
+app.post('/verify-claim', checkInitialized, verifyLimiter, async (req, res) => {
   try {
     const { claim } = req.body;
 
@@ -110,7 +140,7 @@ app.post('/verify-claim', verifyLimiter, async (req, res) => {
       }
     });
 
-  } catch (error) {
+  } catch (error: any) {
     console.error('❌ Error in verify-claim:', error);
     return res.status(500).json({
       success: false,
@@ -120,8 +150,92 @@ app.post('/verify-claim', verifyLimiter, async (req, res) => {
   }
 });
 
+// SSE STREAMING ENDPOINT
+app.get("/verify-stream", checkInitialized, async (req, res) => {
+  const claim = req.query.claim as string;
+  if (!claim) return res.status(400).json({ error: "claim required" });
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.flushHeaders?.();
+
+  const send = (event: string, data: any) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  req.on("close", () => {
+    res.end();
+  });
+
+  const orchestrator = new AgentOrchestrator(detector, (msg) => send("step", msg));
+
+  try {
+    const result = await orchestrator.verifyClaimAgentic(claim);
+    send("final", result);
+  } catch (e: any) {
+    send("error", { message: e?.message || "verification failed" });
+  } finally {
+    res.end();
+  }
+
+  return res;
+});
+
+// Agentic RAG verification endpoint
+app.post('/verify-claim-agentic', checkInitialized, verifyLimiter, async (req, res) => {
+  try {
+    const { claim } = req.body;
+
+    if (!claim || typeof claim !== 'string' || claim.trim().length === 0) {
+      return res.status(400).json({
+        error: 'Invalid claim',
+        message: 'Claim must be a non-empty string'
+      });
+    }
+
+    if (claim.length > 1000) {
+      return res.status(400).json({
+        error: 'Claim too long',
+        message: 'Claim must be less than 1000 characters'
+      });
+    }
+
+    console.log(`🤖 API: Agentic verification for claim: "${claim.substring(0, 100)}..."`);
+
+    const startTime = Date.now();
+    const orchestrator = new AgentOrchestrator(detector);
+    const result = await orchestrator.verifyClaimAgentic(claim.trim());
+    const processingTime = Date.now() - startTime;
+
+    return res.json({
+      success: true,
+      data: {
+        claim: claim.trim(),
+        verification: result,
+        metadata: {
+          processingTimeMs: processingTime,
+          timestamp: new Date().toISOString(),
+          evidenceCount: result.evidence.length,
+          verificationType: 'agentic-rag'
+        }
+      }
+    });
+
+  } catch (error: any) {
+    console.error('❌ Error in agentic verification:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Agentic verification failed',
+      message: 'An error occurred while verifying the claim using agentic approach'
+    });
+  }
+});
+
 // Update news database endpoint
-app.post('/update-news', async (req, res) => {
+app.post('/update-news', checkInitialized, async (req, res) => {
   try {
     const { topics } = req.body;
     
@@ -158,7 +272,7 @@ app.post('/update-news', async (req, res) => {
       topics: validTopics
     });
 
-  } catch (error) {
+  } catch (error: any) {
     console.error('❌ Error in update-news:', error);
     return res.status(500).json({
       success: false,
@@ -168,80 +282,9 @@ app.post('/update-news', async (req, res) => {
   }
 });
 
-// Batch verification endpoint
-app.post('/verify-claims-batch', verifyLimiter, async (req, res) => {
-  try {
-    const { claims } = req.body;
-    
-    if (!claims || !Array.isArray(claims)) {
-      return res.status(400).json({
-        error: 'Invalid claims',
-        message: 'Claims must be an array of strings'
-      });
-    }
-
-    if (claims.length > 5) {
-      return res.status(400).json({
-        error: 'Too many claims',
-        message: 'Maximum 5 claims allowed per batch request'
-      });
-    }
-
-    const validClaims = claims.filter(c => 
-      typeof c === 'string' && c.trim().length > 0 && c.length <= 1000
-    );
-
-    if (validClaims.length === 0) {
-      return res.status(400).json({
-        error: 'No valid claims',
-        message: 'At least one valid claim required'
-      });
-    }
-
-    console.log(`🔍 API: Batch verifying ${validClaims.length} claims`);
-    
-    const results = await Promise.all(
-      validClaims.map(async (claim) => {
-        try {
-          const verification = await detector.verifyClaim(claim.trim());
-          return {
-            claim: claim.trim(),
-            verification,
-            success: true
-          };
-        } catch (error) {
-          return {
-            claim: claim.trim(),
-            error: 'Verification failed',
-            success: false
-          };
-        }
-      })
-    );
-
-    return res.json({
-      success: true,
-      data: results,
-      metadata: {
-        totalClaims: validClaims.length,
-        timestamp: new Date().toISOString()
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ Error in batch verification:', error);
-    return res.status(500).json({
-      success: false,
-      error: 'Batch verification failed',
-      message: 'An error occurred while verifying claims'
-    });
-  }
-});
-
 // System stats endpoint
-app.get('/stats', async (req, res) => {
+app.get('/stats', checkInitialized, async (req, res) => {
   try {
-    // You can extend this with actual metrics from Qdrant
     const stats = {
       status: 'operational',
       uptime: process.uptime(),
@@ -256,95 +299,6 @@ app.get('/stats', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to get statistics'
-    });
-  }
-});
-
-// SSE STREAMING ENDPOINT
-app.get("/verify-stream", async (req, res) => {
-  const claim = req.query.claim as string;
-  if (!claim) return res.status(400).json({ error: "claim required" });
-
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.flushHeaders?.();
-
-  const send = (event: string, data: any) => {
-    res.write(`event: ${event}\n`);
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
-  };
-
-  // Handle client disconnect
-  req.on("close", () => {
-    res.end();
-  });
-
-  const orchestrator = new AgentOrchestrator(detector, (msg) => send("step", msg));
-
-  try {
-    const result = await orchestrator.verifyClaimAgentic(claim);
-    send("final", result);
-  } catch (e: any) {
-    send("error", { message: e?.message || "verification failed" });
-  } finally {
-    res.end();
-  }
-
-  // Ensure a response is always returned
-  return res;
-});
-
-
-// Agentic RAG verification endpoint
-app.post('/verify-claim-agentic', verifyLimiter, async (req, res) => {
-  try {
-    const { claim } = req.body;
-
-    // Validation
-    if (!claim || typeof claim !== 'string' || claim.trim().length === 0) {
-      return res.status(400).json({
-        error: 'Invalid claim',
-        message: 'Claim must be a non-empty string'
-      });
-    }
-
-    if (claim.length > 1000) {
-      return res.status(400).json({
-        error: 'Claim too long',
-        message: 'Claim must be less than 1000 characters'
-      });
-    }
-
-    console.log(`🤖 API: Agentic verification for claim: "${claim.substring(0, 100)}..."`);
-
-    const startTime = Date.now();
-    const orchestrator = new AgentOrchestrator(detector);
-    const result = await orchestrator.verifyClaimAgentic(claim.trim());
-    const processingTime = Date.now() - startTime;
-
-    return res.json({
-      success: true,
-      data: {
-        claim: claim.trim(),
-        verification: result,
-        metadata: {
-          processingTimeMs: processingTime,
-          timestamp: new Date().toISOString(),
-          evidenceCount: result.evidence.length,
-          verificationType: 'agentic-rag',
-          agentsUsed: ['claim_analyst', 'evidence_researcher', 'fact_checker', 'synthesizer']
-        }
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ Error in agentic verification:', error);
-    return res.status(500).json({
-      success: false,
-      error: 'Agentic verification failed',
-      message: 'An error occurred while verifying the claim using agentic approach'
     });
   }
 });
@@ -372,9 +326,20 @@ app.use((req, res) => {
 // Start server
 async function startServer() {
   try {
+    console.log('🔧 Initializing services...');
     await initializeDetector();
     
-    // Start continuous news monitoring
+    app.listen(PORT, () => {
+      console.log(`\n${'='.repeat(60)}`);
+      console.log(`🚀 Misinformation Detection API running on port ${PORT}`);
+      console.log(`📖 API Documentation: http://localhost:${PORT}/`);
+      console.log(`💚 Health Check: http://localhost:${PORT}/health`);
+      console.log(`${'='.repeat(60)}\n`);
+    });
+
+    // Optional: Start continuous news monitoring (disabled by default to save resources)
+    // Uncomment if you want automatic updates
+    /*
     const monitoringTopics = [
       'breaking news india',
       'government policy',
@@ -382,7 +347,6 @@ async function startServer() {
       'fact check news'
     ];
     
-    // Update news every hour
     setInterval(async () => {
       try {
         await detector.updateNewsDatabase(monitoringTopics);
@@ -390,16 +354,12 @@ async function startServer() {
       } catch (error) {
         console.error('❌ Scheduled news update failed:', error);
       }
-    }, 60 * 60 * 1000); // 1 hour
+    }, 60 * 60 * 1000);
+    */
 
-    app.listen(PORT, () => {
-      console.log(`🚀 Misinformation Detection API running on port ${PORT}`);
-      console.log(`📖 API Documentation: http://localhost:${PORT}/`);
-      console.log(`💚 Health Check: http://localhost:${PORT}/health`);
-    });
-
-  } catch (error) {
-    console.error('❌ Failed to start server:', error);
+  } catch (error: any) {
+    console.error('❌ Failed to start server:', error.message);
+    console.error('Stack:', error.stack);
     process.exit(1);
   }
 }
@@ -413,6 +373,11 @@ process.on('SIGTERM', () => {
 process.on('SIGINT', () => {
   console.log('👋 Received SIGINT, shutting down gracefully...');
   process.exit(0);
+});
+
+// Catch unhandled rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
 if (require.main === module) {

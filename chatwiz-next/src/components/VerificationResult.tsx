@@ -5,10 +5,12 @@ import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
 import { VerificationStatus } from "./VerificationSidebar";
 
+type SourceInfo = string | { name?: string; icon?: string; [key: string]: any };
+
 interface EvidenceItem {
-  title: string;
-  source: string;
-  snippet: string;
+  title?: string;
+  source?: SourceInfo;
+  snippet?: string;
   link?: string;
   date?: string;
 }
@@ -102,32 +104,42 @@ export const VerificationResult = ({
           </p>
         ) : (
           <div className="grid gap-4 md:grid-cols-2">
-            {sources.map((item, index) => (
-              <Card key={index} className="p-4 bg-secondary border-border">
-                <div className="flex items-start justify-between mb-3">
-                  <h4 className="text-sm font-semibold text-foreground flex-1 line-clamp-2">
-                    {item.title}
-                  </h4>
-                </div>
+            {sources.map((item, index) => {
+              const sourceName =
+                typeof item.source === "string"
+                  ? item.source
+                  : item.source?.name ?? "Unknown source";
+              const title = item.title ?? sourceName ?? "Untitled source";
+              const snippet =
+                item.snippet ?? "No summary available for this evidence.";
 
-                <p className="text-xs text-primary mb-2">{item.source}</p>
-                <p className="text-sm text-muted-foreground mb-3 line-clamp-2">
-                  {item.snippet}
-                </p>
+              return (
+                <Card key={index} className="p-4 bg-secondary border-border">
+                  <div className="flex items-start justify-between mb-3">
+                    <h4 className="text-sm font-semibold text-foreground flex-1 line-clamp-2">
+                      {title}
+                    </h4>
+                  </div>
 
-                {item.link && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="w-full gap-2"
-                    onClick={() => window.open(item.link, "_blank")}
-                  >
-                    <ExternalLink className="h-3 w-3" />
-                    View Source
-                  </Button>
-                )}
-              </Card>
-            ))}
+                  <p className="text-xs text-primary mb-2">{sourceName}</p>
+                  <p className="text-sm text-muted-foreground mb-3 line-clamp-2">
+                    {snippet}
+                  </p>
+
+                  {item.link && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full gap-2"
+                      onClick={() => window.open(item.link, "_blank")}
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                      View Source
+                    </Button>
+                  )}
+                </Card>
+              );
+            })}
           </div>
         )}
       </Card>

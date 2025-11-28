@@ -474,4 +474,5 @@ if (require.main === module) {
   main();
 }
 
-export { MisinformationDetector, VerificationResult, NewsArticle, ClaimAnalysis };
+
+export { MisinformationDetector, VerificationResult, NewsArticle, ClaimAnalysis, };

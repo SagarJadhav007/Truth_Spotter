@@ -25,7 +25,6 @@ export interface AgenticVerificationResult {
   };
   searchQueries: string[];
   evidenceSources: number;
-  isCasualQuery?: boolean; // Flag to indicate this is a casual query response (not a verification)
 }
 
 type UpdateCallback = (msg: string) => void;
@@ -87,15 +86,141 @@ export class AgentOrchestrator {
     this.onUpdate?.(message);
   }
 
+  private normalizeUrl(url: string | undefined): string | null {
+    if (!url || typeof url !== 'string') return null;
+    
+    try {
+      // Normalize URL: remove trailing slashes, query params, fragments, and normalize
+      const normalized = url.toLowerCase().trim();
+      // Remove protocol and www for comparison
+      const withoutProtocol = normalized.replace(/^https?:\/\//, '').replace(/^www\./, '');
+      // Remove trailing slash
+      const withoutTrailing = withoutProtocol.replace(/\/$/, '');
+      // Remove query params and fragments
+      const clean = withoutTrailing.split('?')[0].split('#')[0];
+      return clean || null;
+    } catch {
+      return url.toLowerCase().trim();
+    }
+  }
+
+  private normalizeText(text: string): string {
+    return text
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, ' ') // Normalize whitespace
+      .trim();
+  }
+
+  private extractLink(doc: Document): string | undefined {
+    const metadata = doc.metadata as any;
+    // Check multiple possible fields for links
+    return metadata?.link || metadata?.url || metadata?.href || undefined;
+  }
+
+  private isValidLink(link: string | undefined): boolean {
+    if (!link || typeof link !== 'string') return false;
+    const trimmed = link.trim();
+    // Check if it's a valid URL format
+    return trimmed.length > 0 && (trimmed.startsWith('http://') || trimmed.startsWith('https://'));
+  }
+
+  private getRecencyScore(value: any): number {
+    if (!value) return 0;
+    const strValue = typeof value === 'string' ? value : (() => {
+      try {
+        return String(value);
+      } catch {
+        return '';
+      }
+    })();
+    const parsed = Date.parse(strValue);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+
   private mapEvidenceToNewsArticles(docs: Document[]): NewsArticle[] {
-    // Limit to prevent memory issues
-    return docs.slice(0, 5).map((doc) => ({
-      title: (doc.metadata as any)?.title ?? (doc.metadata as any)?.source ?? 'Untitled source',
-      snippet: (doc.pageContent || '').slice(0, 150) + '...',
-      link: (doc.metadata as any)?.link ?? undefined,
-      date: (doc.metadata as any)?.date ?? 'Unknown date',
-      source: (doc.metadata as any)?.source ?? 'Unknown',
-    }));
+    // First, deduplicate documents at the Document level based on metadata
+    const docSeen = new Set<string>();
+    const uniqueDocs: Document[] = [];
+
+    for (const doc of docs) {
+      const docLink = this.extractLink(doc);
+      const docTitle = (doc.metadata as any)?.title ?? (doc.metadata as any)?.source ?? '';
+      const docSource = (doc.metadata as any)?.source ?? 'Unknown';
+      
+      let docKey: string;
+      const normalizedLink = this.normalizeUrl(docLink);
+      if (normalizedLink) {
+        docKey = normalizedLink;
+      } else {
+        const normalizedTitle = this.normalizeText(docTitle);
+        const normalizedSource = this.normalizeText(docSource);
+        docKey = `${normalizedTitle}|${normalizedSource}`;
+      }
+
+      if (!docSeen.has(docKey)) {
+        docSeen.add(docKey);
+        uniqueDocs.push(doc);
+      }
+    }
+
+    uniqueDocs.sort(
+      (a, b) =>
+        this.getRecencyScore((b.metadata as any)?.date ?? (b.metadata as any)?.published_at) -
+        this.getRecencyScore((a.metadata as any)?.date ?? (a.metadata as any)?.published_at)
+    );
+
+    // Map the deduplicated documents and extract links from multiple fields
+    const mapped = uniqueDocs.map((doc) => {
+      const link = this.extractLink(doc);
+      return {
+        title: (doc.metadata as any)?.title ?? (doc.metadata as any)?.source ?? 'Untitled source',
+        snippet: (doc.pageContent || '').slice(0, 150) + '...',
+        link: link,
+        date: (doc.metadata as any)?.date ?? 'Unknown date',
+        source: (doc.metadata as any)?.source ?? 'Unknown',
+      };
+    });
+
+    // Deduplicate again at the NewsArticle level (double-check)
+    const seen = new Set<string>();
+    const unique: Array<Omit<NewsArticle, 'link'> & { link?: string }> = [];
+
+    for (const article of mapped) {
+      let key: string;
+      
+      // Use normalized link as primary key if available
+      const normalizedLink = this.normalizeUrl(article.link);
+      if (normalizedLink) {
+        key = normalizedLink;
+      } else {
+        // Fallback to normalized title + source combination
+        const normalizedTitle = this.normalizeText(article.title);
+        const normalizedSource = this.normalizeText(article.source);
+        key = `${normalizedTitle}|${normalizedSource}`;
+      }
+
+      if (!seen.has(key)) {
+        seen.add(key);
+        unique.push(article);
+      }
+    }
+
+    unique.sort((a, b) => this.getRecencyScore(b.date) - this.getRecencyScore(a.date));
+
+    // Filter to only include sources with valid links
+    const withLinks: NewsArticle[] = [];
+    for (const article of unique) {
+      if (this.isValidLink(article.link) && article.link) {
+        withLinks.push({
+          ...article,
+          link: article.link
+        } as NewsArticle);
+      }
+    }
+    
+    // Return up to 5 sources with valid links
+    return withLinks.slice(0, 5);
   }
 
   private cleanup() {
@@ -184,100 +309,41 @@ export class AgentOrchestrator {
   private async routeQuery(query: string): Promise<'casual' | 'verification'> {
     this.step(`🔀 Routing query...`);
     
-    // First, try pattern-based classification (fast and reliable)
-    const lowerQuery = query.toLowerCase().trim();
-    
-    // Pattern-based classification for common casual queries
-    const casualPatterns = [
-      /^(hi|hello|hey|greetings|good morning|good afternoon|good evening)$/i,
-      /^(how are you|what's up|how's it going)$/i,
-      /^(thanks|thank you|thx)$/i,
-      /^(bye|goodbye|see you)$/i,
-      /^(help|can you help|what can you do)$/i,
-      /^(tell me a joke|joke|make me laugh)$/i,
-      /^(what is|what are|explain|how do|how does|why does|why do)/i,
-      /^(opinion|what do you think|what's your view)/i,
-    ];
-    
-    // Check if it's clearly a casual greeting or simple question
-    if (casualPatterns.some(pattern => pattern.test(lowerQuery))) {
-      this.step(`✅ Query classified as CASUAL (pattern match)`);
-      return 'casual';
-    }
-    
-    // Check for verification keywords
-    const verificationPatterns = [
-      /^(is it true|is this true|verify|fact check|check if|did.*happen|did.*occur)/i,
-      /^(claim|statement|assertion|rumor|news|report)/i,
-      /^(prove|disprove|confirm|deny|validate)/i,
-    ];
-    
-    if (verificationPatterns.some(pattern => pattern.test(lowerQuery))) {
-      this.step(`✅ Query classified as VERIFICATION_REQUIRED (pattern match)`);
-      return 'verification';
-    }
-    
-    // If pattern matching doesn't work, try LLM classification
     try {
-      const classificationPrompt = `Classify this query as CASUAL or VERIFICATION_REQUIRED.
+      // Use a simple LLM call to classify the query
+      const classificationPrompt = `Classify the following user query as either "CASUAL" or "VERIFICATION_REQUIRED".
 
 Query: "${query}"
 
-CASUAL = greetings, simple questions, opinions, explanations, creative requests
-VERIFICATION_REQUIRED = claims, factual statements, news, events that need fact-checking
+Rules:
+- CASUAL: Conversational questions, general knowledge, opinions, creative requests, or questions that don't require fact-checking
+- VERIFICATION_REQUIRED: Claims, statements, or questions that assert factual information that needs verification
 
-Respond with ONLY: CASUAL or VERIFICATION_REQUIRED`;
+Respond with ONLY one word: either "CASUAL" or "VERIFICATION_REQUIRED"`;
 
-      // Access genAI directly from detector
-      const genAI = (this.detector as any).genAI;
-      if (!genAI) {
-        throw new Error('genAI not available');
-      }
-
-      const model = genAI.getGenerativeModel({
+      const model = (this.detector as any).genAI?.getGenerativeModel({
         model: 'gemini-2.0-flash',
-        generationConfig: { 
-          maxOutputTokens: 5, 
-          temperature: 0.1 
-        },
+        generationConfig: { maxOutputTokens: 10, temperature: 0.1 },
       });
 
-      const result = await model.generateContent(classificationPrompt);
-      const classification = result.response.text().trim().toUpperCase();
-      
-      // Log the raw response for debugging
-      console.log(`[Classification] Raw response: "${classification}"`);
-      
-      if (classification.includes('CASUAL')) {
-        this.step(`✅ Query classified as CASUAL (LLM)`);
-        return 'casual';
-      } else if (classification.includes('VERIFICATION')) {
-        this.step(`✅ Query classified as VERIFICATION_REQUIRED (LLM)`);
-        return 'verification';
-      } else {
-        // If LLM response is unclear, use heuristics
-        this.step(`⚠️ LLM classification unclear, using heuristics`);
-        // Short queries (< 20 chars) without verification keywords are likely casual
-        if (query.length < 20 && !verificationPatterns.some(p => p.test(lowerQuery))) {
+      if (model) {
+        const result = await model.generateContent(classificationPrompt);
+        const classification = result.response.text().trim().toUpperCase();
+        
+        if (classification.includes('CASUAL')) {
+          this.step(`✅ Query classified as CASUAL`);
           return 'casual';
+        } else {
+          this.step(`✅ Query classified as VERIFICATION_REQUIRED`);
+          return 'verification';
         }
-        return 'verification';
       }
-    } catch (error: any) {
-      console.error('[Classification Error]', error?.message || error);
-      this.step(`⚠️ Classification failed: ${error?.message || 'Unknown error'}`);
-      
-      // Fallback: use heuristics
-      // Very short queries are likely casual greetings
-      if (query.trim().length <= 10 && !lowerQuery.match(/\d/)) {
-        this.step(`✅ Query classified as CASUAL (fallback heuristic)`);
-        return 'casual';
-      }
-      
-      // Default to verification for safety
-      this.step(`⚠️ Defaulting to VERIFICATION_REQUIRED`);
-      return 'verification';
+    } catch (error) {
+      this.step(`⚠️ Classification failed, defaulting to VERIFICATION_REQUIRED`);
     }
+    
+    // Default to verification if classification fails
+    return 'verification';
   }
 
   // Handle casual queries - use direct LLM call instead of full agents SDK to avoid memory issues
@@ -327,7 +393,6 @@ Provide a helpful response. Be concise but informative.`;
         },
         searchQueries: [],
         evidenceSources: 0,
-        isCasualQuery: true, // Flag for frontend to render as chat message
       };
     } catch (error: any) {
       this.step(`❌ Error handling casual query: ${error?.message}`);
@@ -347,7 +412,6 @@ Provide a helpful response. Be concise but informative.`;
         },
         searchQueries: [],
         evidenceSources: 0,
-        isCasualQuery: true, // Flag for frontend to render as chat message
       };
     }
   }
@@ -376,6 +440,7 @@ Provide a helpful response. Be concise but informative.`;
       const allArticles = allArticlesArrays
         .filter(result => result.status === 'fulfilled')
         .flatMap(result => result.value);
+      allArticles.sort((a, b) => this.getRecencyScore(b.date) - this.getRecencyScore(a.date));
       
       // Batch store to reduce API calls
       if (allArticles.length > 0) {
@@ -383,10 +448,15 @@ Provide a helpful response. Be concise but informative.`;
       }
       this.step(`✅ Evidence Researcher completed`);
       
-      // Stage 3: Retrieve relevant evidence
+      // Stage 3: Retrieve relevant evidence (pull extra, then sort by recency)
       this.step(`🔎 Stage 3 — Finding relevant evidence...`);
-      this.evidenceDocs = await this.detector.findRelevantEvidence(claim, 5);
-      this.step(`✅ Retrieved ${this.evidenceDocs.length} evidence documents`);
+      const evidenceDocsRaw = await this.detector.findRelevantEvidence(claim, 20);
+      this.evidenceDocs = evidenceDocsRaw.sort(
+        (a, b) =>
+          this.getRecencyScore((b.metadata as any)?.date ?? (b.metadata as any)?.published_at) -
+          this.getRecencyScore((a.metadata as any)?.date ?? (a.metadata as any)?.published_at)
+      );
+      this.step(`✅ Retrieved ${this.evidenceDocs.length} evidence documents (recency prioritized)`);
       
       // Stage 4: Fact checking
       this.step(`⚖️ Stage 4 — Fact Checker running...`);

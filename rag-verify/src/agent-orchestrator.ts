@@ -30,6 +30,18 @@ export interface AgenticVerificationResult {
 type UpdateCallback = (msg: string) => void;
 
 // ==============================
+// CONTEXT INTERFACE
+// ==============================
+
+export interface VerificationContext {
+  userId?: string;
+  userName?: string;
+  conversationId?: string;
+  requestId: string;
+  timestamp: string;
+}
+
+// ==============================
 // ORCHESTRATOR CLASS
 // ==============================
 
@@ -37,6 +49,7 @@ export class AgentOrchestrator {
   private detector: MisinformationDetector;
   private model: any;
   private onUpdate?: UpdateCallback;
+  private context?: VerificationContext;
   private agentInsights: {
     claimAnalyst: string;
     evidenceResearcher: string;
@@ -53,16 +66,19 @@ export class AgentOrchestrator {
   private isRunning: boolean = false;
   private timeoutMs: number = 120000; // 2 minutes timeout
 
-  constructor(detector: MisinformationDetector, onUpdate?: UpdateCallback) {
+  constructor(detector: MisinformationDetector, onUpdate?: UpdateCallback, context?: VerificationContext) {
     this.detector = detector;
     this.onUpdate = onUpdate;
+    this.context = context;
 
     // Initialize Gemini model using AI SDK extensions
     if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
       throw new Error('GOOGLE_GENERATIVE_AI_API_KEY is required');
     }
 
-    this.model = aisdk(google('gemini-2.5-flash'));
+    // aisdk wrapper converts LanguageModelV1 to LanguageModelV2
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    this.model = aisdk(google('gemini-2.5-flash')) as any;
   }
 
   private step(message: string) {
@@ -70,15 +86,141 @@ export class AgentOrchestrator {
     this.onUpdate?.(message);
   }
 
+  private normalizeUrl(url: string | undefined): string | null {
+    if (!url || typeof url !== 'string') return null;
+    
+    try {
+      // Normalize URL: remove trailing slashes, query params, fragments, and normalize
+      const normalized = url.toLowerCase().trim();
+      // Remove protocol and www for comparison
+      const withoutProtocol = normalized.replace(/^https?:\/\//, '').replace(/^www\./, '');
+      // Remove trailing slash
+      const withoutTrailing = withoutProtocol.replace(/\/$/, '');
+      // Remove query params and fragments
+      const clean = withoutTrailing.split('?')[0].split('#')[0];
+      return clean || null;
+    } catch {
+      return url.toLowerCase().trim();
+    }
+  }
+
+  private normalizeText(text: string): string {
+    return text
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, ' ') // Normalize whitespace
+      .trim();
+  }
+
+  private extractLink(doc: Document): string | undefined {
+    const metadata = doc.metadata as any;
+    // Check multiple possible fields for links
+    return metadata?.link || metadata?.url || metadata?.href || undefined;
+  }
+
+  private isValidLink(link: string | undefined): boolean {
+    if (!link || typeof link !== 'string') return false;
+    const trimmed = link.trim();
+    // Check if it's a valid URL format
+    return trimmed.length > 0 && (trimmed.startsWith('http://') || trimmed.startsWith('https://'));
+  }
+
+  private getRecencyScore(value: any): number {
+    if (!value) return 0;
+    const strValue = typeof value === 'string' ? value : (() => {
+      try {
+        return String(value);
+      } catch {
+        return '';
+      }
+    })();
+    const parsed = Date.parse(strValue);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+
   private mapEvidenceToNewsArticles(docs: Document[]): NewsArticle[] {
-    // Limit to prevent memory issues
-    return docs.slice(0, 5).map((doc) => ({
-      title: (doc.metadata as any)?.title ?? (doc.metadata as any)?.source ?? 'Untitled source',
-      snippet: (doc.pageContent || '').slice(0, 150) + '...',
-      link: (doc.metadata as any)?.link ?? undefined,
-      date: (doc.metadata as any)?.date ?? 'Unknown date',
-      source: (doc.metadata as any)?.source ?? 'Unknown',
-    }));
+    // First, deduplicate documents at the Document level based on metadata
+    const docSeen = new Set<string>();
+    const uniqueDocs: Document[] = [];
+
+    for (const doc of docs) {
+      const docLink = this.extractLink(doc);
+      const docTitle = (doc.metadata as any)?.title ?? (doc.metadata as any)?.source ?? '';
+      const docSource = (doc.metadata as any)?.source ?? 'Unknown';
+      
+      let docKey: string;
+      const normalizedLink = this.normalizeUrl(docLink);
+      if (normalizedLink) {
+        docKey = normalizedLink;
+      } else {
+        const normalizedTitle = this.normalizeText(docTitle);
+        const normalizedSource = this.normalizeText(docSource);
+        docKey = `${normalizedTitle}|${normalizedSource}`;
+      }
+
+      if (!docSeen.has(docKey)) {
+        docSeen.add(docKey);
+        uniqueDocs.push(doc);
+      }
+    }
+
+    uniqueDocs.sort(
+      (a, b) =>
+        this.getRecencyScore((b.metadata as any)?.date ?? (b.metadata as any)?.published_at) -
+        this.getRecencyScore((a.metadata as any)?.date ?? (a.metadata as any)?.published_at)
+    );
+
+    // Map the deduplicated documents and extract links from multiple fields
+    const mapped = uniqueDocs.map((doc) => {
+      const link = this.extractLink(doc);
+      return {
+        title: (doc.metadata as any)?.title ?? (doc.metadata as any)?.source ?? 'Untitled source',
+        snippet: (doc.pageContent || '').slice(0, 150) + '...',
+        link: link,
+        date: (doc.metadata as any)?.date ?? 'Unknown date',
+        source: (doc.metadata as any)?.source ?? 'Unknown',
+      };
+    });
+
+    // Deduplicate again at the NewsArticle level (double-check)
+    const seen = new Set<string>();
+    const unique: Array<Omit<NewsArticle, 'link'> & { link?: string }> = [];
+
+    for (const article of mapped) {
+      let key: string;
+      
+      // Use normalized link as primary key if available
+      const normalizedLink = this.normalizeUrl(article.link);
+      if (normalizedLink) {
+        key = normalizedLink;
+      } else {
+        // Fallback to normalized title + source combination
+        const normalizedTitle = this.normalizeText(article.title);
+        const normalizedSource = this.normalizeText(article.source);
+        key = `${normalizedTitle}|${normalizedSource}`;
+      }
+
+      if (!seen.has(key)) {
+        seen.add(key);
+        unique.push(article);
+      }
+    }
+
+    unique.sort((a, b) => this.getRecencyScore(b.date) - this.getRecencyScore(a.date));
+
+    // Filter to only include sources with valid links
+    const withLinks: NewsArticle[] = [];
+    for (const article of unique) {
+      if (this.isValidLink(article.link) && article.link) {
+        withLinks.push({
+          ...article,
+          link: article.link
+        } as NewsArticle);
+      }
+    }
+    
+    // Return up to 5 sources with valid links
+    return withLinks.slice(0, 5);
   }
 
   private cleanup() {
@@ -93,13 +235,21 @@ export class AgentOrchestrator {
     }
   }
 
-  async verifyClaimAgentic(claim: string): Promise<AgenticVerificationResult> {
+  async verifyClaimAgentic(claim: string, context?: VerificationContext): Promise<AgenticVerificationResult> {
     if (this.isRunning) {
       throw new Error('Verification already in progress');
     }
 
+    // Use provided context or existing context
+    if (context) {
+      this.context = context;
+    }
+
     this.isRunning = true;
     this.step(`🤖 Starting Agentic Verification`);
+    if (this.context?.userName) {
+      this.step(`👤 User: ${this.context.userName} (Request ID: ${this.context.requestId})`);
+    }
     this.step(`📌 Claim: "${claim}"`);
 
     // Reset state
@@ -118,9 +268,19 @@ export class AgentOrchestrator {
     });
 
     try {
-      // Run with timeout
-      const verificationPromise = this.runVerification(claim);
-      const result = await Promise.race([verificationPromise, timeoutPromise]);
+      // Step 0: Route the query
+      const queryType = await this.routeQuery(claim);
+      
+      // Run with timeout based on query type
+      let resultPromise: Promise<AgenticVerificationResult>;
+      
+      if (queryType === 'casual') {
+        resultPromise = this.handleCasualQuery(claim);
+      } else {
+        resultPromise = this.runVerification(claim);
+      }
+      
+      const result = await Promise.race([resultPromise, timeoutPromise]);
       
       return result;
     } catch (error: any) {
@@ -145,48 +305,160 @@ export class AgentOrchestrator {
     }
   }
 
+  // Router step: Classify query and route accordingly
+  private async routeQuery(query: string): Promise<'casual' | 'verification'> {
+    this.step(`🔀 Routing query...`);
+    
+    try {
+      // Use a simple LLM call to classify the query
+      const classificationPrompt = `Classify the following user query as either "CASUAL" or "VERIFICATION_REQUIRED".
+
+Query: "${query}"
+
+Rules:
+- CASUAL: Conversational questions, general knowledge, opinions, creative requests, or questions that don't require fact-checking
+- VERIFICATION_REQUIRED: Claims, statements, or questions that assert factual information that needs verification
+
+Respond with ONLY one word: either "CASUAL" or "VERIFICATION_REQUIRED"`;
+
+      const model = (this.detector as any).genAI?.getGenerativeModel({
+        model: 'gemini-2.0-flash',
+        generationConfig: { maxOutputTokens: 10, temperature: 0.1 },
+      });
+
+      if (model) {
+        const result = await model.generateContent(classificationPrompt);
+        const classification = result.response.text().trim().toUpperCase();
+        
+        if (classification.includes('CASUAL')) {
+          this.step(`✅ Query classified as CASUAL`);
+          return 'casual';
+        } else {
+          this.step(`✅ Query classified as VERIFICATION_REQUIRED`);
+          return 'verification';
+        }
+      }
+    } catch (error) {
+      this.step(`⚠️ Classification failed, defaulting to VERIFICATION_REQUIRED`);
+    }
+    
+    // Default to verification if classification fails
+    return 'verification';
+  }
+
+  // Handle casual queries - use direct LLM call instead of full agents SDK to avoid memory issues
+  private async handleCasualQuery(query: string): Promise<AgenticVerificationResult> {
+    this.step(`💬 Handling casual query...`);
+    
+    try {
+      // Use a simple, direct LLM call instead of the full agents SDK stack
+      // This avoids memory issues and is more efficient for casual queries
+      const casualPrompt = `You are a helpful, friendly AI assistant. Answer the following question in a clear, conversational, and helpful manner.
+
+Question: "${query}"
+
+Provide a helpful response. Be concise but informative.`;
+
+      const model = (this.detector as any).genAI?.getGenerativeModel({
+        model: 'gemini-2.0-flash',
+        generationConfig: { 
+          maxOutputTokens: 500, 
+          temperature: 0.7 
+        },
+      });
+
+      if (!model) {
+        throw new Error('Failed to initialize model for casual query');
+      }
+
+      this.step(`🤖 Generating response...`);
+      const result = await model.generateContent(casualPrompt);
+      const casualResponse = result.response.text().trim();
+
+      this.step(`✅ Casual query handled successfully`);
+
+      // Return a result formatted for casual queries
+      return {
+        isVerified: true, // Casual queries don't need verification
+        confidence: 100,
+        riskLevel: 'LOW',
+        factCheckSummary: casualResponse || 'I\'m here to help with your question!',
+        analysis: 'This was a casual query handled by the conversational agent.',
+        evidence: [],
+        agentInsights: {
+          claimAnalyst: 'N/A - Casual query',
+          evidenceResearcher: 'N/A - Casual query',
+          factChecker: 'N/A - Casual query',
+          synthesizer: 'N/A - Casual query',
+        },
+        searchQueries: [],
+        evidenceSources: 0,
+      };
+    } catch (error: any) {
+      this.step(`❌ Error handling casual query: ${error?.message}`);
+      // Fallback: return a simple response
+      return {
+        isVerified: true,
+        confidence: 100,
+        riskLevel: 'LOW',
+        factCheckSummary: 'I apologize, but I encountered an error processing your casual query. Please try rephrasing your question.',
+        analysis: `Error: ${error?.message || 'Unknown error'}`,
+        evidence: [],
+        agentInsights: {
+          claimAnalyst: 'N/A - Casual query',
+          evidenceResearcher: 'N/A - Casual query',
+          factChecker: 'N/A - Casual query',
+          synthesizer: 'N/A - Casual query',
+        },
+        searchQueries: [],
+        evidenceSources: 0,
+      };
+    }
+  }
+
+  // In agent-orchestrator.ts - Add batching and memory management
   private async runVerification(claim: string): Promise<AgenticVerificationResult> {
     try {
-      // Create tools and agents with memory limits
-      const tools = createAgentTools(this.detector);
-      const agents = createAgents(this.model, tools);
-
-      this.step(`🔍 Stage 1 — Claim Analyst running...`);
-
-      // Simplified approach: Use direct LLM calls instead of full agent framework
-      // to reduce memory overhead
-      
-      // Stage 1: Analyze claim
+      // Stage 1: Analyze claim with lighter model
       const analysis = await this.detector.analyzeClaim(claim);
-      this.agentInsights.claimAnalyst = `Extracted ${analysis.extractedClaims.length} sub-claims and ${analysis.keywords.length} keywords`;
+      this.agentInsights.claimAnalyst = `Extracted ${analysis.extractedClaims.length} sub-claims`;
       this.step(`✅ Claim Analyst completed`);
-
-      // Stage 2: Search and gather evidence (limit to 3 queries max)
+      
+      // Stage 2: Parallel search with limits (prevent sequential blocking)
       this.step(`📚 Stage 2 — Evidence Researcher running...`);
-      const searchQueries = analysis.keywords.slice(0, 3);
+      const searchQueries = analysis.keywords.slice(0, 2); // Reduced from 3
       this.searchQueries = searchQueries;
       
-      let allArticles: NewsArticle[] = [];
-      for (const query of searchQueries.slice(0, 2)) { // Limit to 2 queries
-        const articles = await this.detector.fetchGoogleNewsSearch(query);
-        allArticles.push(...articles.slice(0, 3)); // Limit articles per query
-        
-        if (articles.length > 0) {
-          await this.detector.storeNewsArticles(articles.slice(0, 3));
-        }
-        
-        // Small delay to prevent rate limits
-        await new Promise(resolve => setTimeout(resolve, 500));
-      }
+      // Parallel fetch with Promise.all instead of sequential
+      const articlePromises = searchQueries.map(query => 
+        this.detector.fetchGoogleNewsSearch(query)
+          .then(articles => articles.slice(0, 2)) // Limit per query
+          .catch(() => []) // Graceful failure
+      );
       
+      const allArticlesArrays = await Promise.allSettled(articlePromises);
+      const allArticles = allArticlesArrays
+        .filter(result => result.status === 'fulfilled')
+        .flatMap(result => result.value);
+      allArticles.sort((a, b) => this.getRecencyScore(b.date) - this.getRecencyScore(a.date));
+      
+      // Batch store to reduce API calls
+      if (allArticles.length > 0) {
+        await this.detector.storeNewsArticles(allArticles.slice(0, 5));
+      }
       this.step(`✅ Evidence Researcher completed`);
-
-      // Stage 3: Retrieve relevant evidence (limit to 5 docs)
+      
+      // Stage 3: Retrieve relevant evidence (pull extra, then sort by recency)
       this.step(`🔎 Stage 3 — Finding relevant evidence...`);
-      this.evidenceDocs = await this.detector.findRelevantEvidence(claim, 5);
-      this.step(`✅ Retrieved ${this.evidenceDocs.length} evidence documents`);
-
-      // Stage 4: Fact checking via direct LLM call
+      const evidenceDocsRaw = await this.detector.findRelevantEvidence(claim, 20);
+      this.evidenceDocs = evidenceDocsRaw.sort(
+        (a, b) =>
+          this.getRecencyScore((b.metadata as any)?.date ?? (b.metadata as any)?.published_at) -
+          this.getRecencyScore((a.metadata as any)?.date ?? (a.metadata as any)?.published_at)
+      );
+      this.step(`✅ Retrieved ${this.evidenceDocs.length} evidence documents (recency prioritized)`);
+      
+      // Stage 4: Fact checking
       this.step(`⚖️ Stage 4 — Fact Checker running...`);
       const verification = await this.detector.verifyClaimWithEvidence(
         claim,
@@ -195,10 +467,10 @@ export class AgentOrchestrator {
       );
       this.agentInsights.factChecker = `Verdict: ${verification.isVerified ? 'SUPPORTED' : 'REFUTED/INCONCLUSIVE'}`;
       this.step(`✅ Fact Checker completed`);
-
+      
       // Build final result
       const mappedEvidence = this.mapEvidenceToNewsArticles(this.evidenceDocs);
-
+      
       const finalResult: AgenticVerificationResult = {
         isVerified: verification.isVerified,
         confidence: verification.confidence,
@@ -210,10 +482,9 @@ export class AgentOrchestrator {
         searchQueries: this.searchQueries,
         evidenceSources: this.evidenceDocs.length,
       };
-
+      
       this.step(`🎯 Verification complete`);
       return finalResult;
-
     } catch (error: any) {
       throw new Error(`Verification failed: ${error?.message || 'Unknown error'}`);
     }

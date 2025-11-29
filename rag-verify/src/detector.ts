@@ -67,6 +67,19 @@ class MisinformationDetector {
     });
   }
 
+  private getRecencyScore(value: any): number {
+    if (!value) return 0;
+    const strValue = typeof value === 'string' ? value : (() => {
+      try {
+        return String(value);
+      } catch {
+        return '';
+      }
+    })();
+    const parsed = Date.parse(strValue);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+
   // ==============================
   // INIT VECTOR STORE
   // ==============================
@@ -108,15 +121,16 @@ class MisinformationDetector {
       };
 
       const results = await getJson(params);
-      return (
+      const articles =
         results.news_results?.map((article: any) => ({
           title: article.title,
           snippet: article.snippet,
           link: article.link,
           date: article.date,
           source: article.source,
-        })) || []
-      );
+        })) || [];
+
+      return articles.sort((a: NewsArticle, b: NewsArticle) => this.getRecencyScore(b.date) - this.getRecencyScore(a.date));
     } catch (error) {
       console.error('❌ Error fetching news:', error);
       return [];
@@ -319,7 +333,13 @@ Return JSON:
       generationConfig: { maxOutputTokens: 600, temperature: 0.1 },
     });
 
-    const evidenceText = evidence
+    const sortedEvidence = [...evidence].sort(
+      (a, b) =>
+        this.getRecencyScore((b.metadata as any)?.date ?? (b.metadata as any)?.published_at) -
+        this.getRecencyScore((a.metadata as any)?.date ?? (a.metadata as any)?.published_at)
+    );
+
+    const evidenceText = sortedEvidence
       .map(
         (doc, i) =>
           `Evidence ${i + 1}: ${doc.pageContent}\nSource: ${doc.metadata.source}\nDate: ${doc.metadata.date}\n---`
@@ -334,8 +354,12 @@ You are a fact-checker. Verify the following claim using the provided evidence.
 Claim: "${claim}"
 Extracted Sub-Claims: ${analysis.extractedClaims.join(', ')}
 
-Evidence:
+Evidence (sorted with newest first):
 ${evidenceText}
+
+Guidelines:
+- ALWAYS prioritize the most recent credible evidence. If newer and older sources conflict, trust the newer data unless it is clearly unreliable.
+- Keep reasoning concise but precise so downstream systems can explain the recency trade-offs.
 
 Return JSON:
 {
@@ -350,7 +374,7 @@ Return JSON:
       const response = await this.safeGenerate(model, prompt);
       const parsed = this.extractJsonFromResponse(response);
 
-      const relevantArticles: NewsArticle[] = evidence.map(doc => ({
+      const relevantArticles: NewsArticle[] = sortedEvidence.map(doc => ({
         title: doc.metadata.title,
         snippet: doc.pageContent.substring(0, 200) + '...',
         link: doc.metadata.link,
@@ -410,7 +434,12 @@ Return JSON:
       if (freshNews.length > 0) await this.storeNewsArticles(freshNews);
 
       console.log('🔎 Finding relevant evidence...');
-      const evidence = await this.findRelevantEvidence(claim, 15);
+      const evidenceRaw = await this.findRelevantEvidence(claim, 20);
+      const evidence = evidenceRaw.sort(
+        (a, b) =>
+          this.getRecencyScore((b.metadata as any)?.date ?? (b.metadata as any)?.published_at) -
+          this.getRecencyScore((a.metadata as any)?.date ?? (a.metadata as any)?.published_at)
+      );
 
       if (evidence.length === 0)
         return {
@@ -474,4 +503,5 @@ if (require.main === module) {
   main();
 }
 
-export { MisinformationDetector, VerificationResult, NewsArticle, ClaimAnalysis };
+
+export { MisinformationDetector, VerificationResult, NewsArticle, ClaimAnalysis, };

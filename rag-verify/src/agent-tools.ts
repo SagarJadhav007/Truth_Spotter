@@ -1,8 +1,9 @@
-import { FunctionTool } from '@openai/agents';
+import { FunctionTool, RunContext } from '@openai/agents';
 import { MisinformationDetector, NewsArticle, ClaimAnalysis } from './detector';
 import { Document } from '@langchain/core/documents';
 import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
+import { VerificationContext } from './agent-orchestrator';
 
 // ==============================
 // TOOL SCHEMAS
@@ -41,8 +42,12 @@ export function createAgentTools(detector: MisinformationDetector) {
       name: 'analyze_claim',
       description: 'Analyze a claim to extract sub-claims, keywords, and context for fact-checking',
       parameters: zodToJsonSchema(AnalyzeClaimSchema) as unknown as any,
-      invoke: async (_runContext: any, input: string): Promise<ClaimAnalysis> => {
+      invoke: async (runContext: RunContext<VerificationContext>, input: string): Promise<ClaimAnalysis> => {
         try {
+          const context = runContext?.context;
+          if (context?.userName) {
+            console.log(`🔍 Analyzing claim for user: ${context.userName} (Request: ${context.requestId})`);
+          }
           const args = AnalyzeClaimSchema.parse(JSON.parse(input));
           return await detector.analyzeClaim(args.claim);
         } catch (error: any) {
@@ -58,8 +63,12 @@ export function createAgentTools(detector: MisinformationDetector) {
       name: 'search_news',
       description: 'Search Google News for articles related to a query',
       parameters: zodToJsonSchema(SearchNewsSchema) as any,
-      invoke: async (_runContext: any, input: string): Promise<NewsArticle[]> => {
+      invoke: async (runContext: RunContext<VerificationContext>, input: string): Promise<NewsArticle[]> => {
         try {
+          const context = runContext?.context;
+          if (context?.requestId) {
+            console.log(`📰 Searching news for request: ${context.requestId}`);
+          }
           const args = SearchNewsSchema.parse(JSON.parse(input));
           return await detector.fetchGoogleNewsSearch(args.query);
         } catch (error: any) {
@@ -75,10 +84,14 @@ export function createAgentTools(detector: MisinformationDetector) {
       name: 'store_articles',
       description: 'Store news articles in the vector database for later retrieval',
       parameters: zodToJsonSchema(StoreArticlesSchema) as any,
-      invoke: async (_runContext: any, input: string): Promise<{ success: boolean; stored: number }> => {
+      invoke: async (runContext: RunContext<VerificationContext>, input: string): Promise<{ success: boolean; stored: number }> => {
         try {
+          const context = runContext?.context;
           const args = StoreArticlesSchema.parse(JSON.parse(input));
           await detector.storeNewsArticles(args.articles);
+          if (context?.requestId) {
+            console.log(`💾 Stored ${args.articles.length} articles for request: ${context.requestId}`);
+          }
           return { success: true, stored: args.articles.length };
         } catch (error: any) {
           console.error('❌ Error in store_articles tool:', error);
@@ -93,10 +106,15 @@ export function createAgentTools(detector: MisinformationDetector) {
       name: 'retrieve_evidence',
       description: 'Retrieve relevant evidence documents from the vector database for a claim',
       parameters: zodToJsonSchema(RetrieveEvidenceSchema) as any,
-      invoke: async (_runContext: any, input: string): Promise<Document[]> => {
+      invoke: async (runContext: RunContext<VerificationContext>, input: string): Promise<Document[]> => {
         try {
+          const context = runContext?.context;
           const args = RetrieveEvidenceSchema.parse(JSON.parse(input));
-          return await detector.findRelevantEvidence(args.claim, args.k || 10);
+          const evidence = await detector.findRelevantEvidence(args.claim, args.k || 10);
+          if (context?.requestId) {
+            console.log(`🔎 Retrieved ${evidence.length} evidence docs for request: ${context.requestId}`);
+          }
+          return evidence;
         } catch (error: any) {
           console.error('❌ Error in retrieve_evidence tool:', error);
           throw new Error(`Failed to retrieve evidence: ${error?.message || 'Unknown error'}`);

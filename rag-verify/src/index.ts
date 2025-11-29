@@ -170,10 +170,19 @@ app.get("/verify-stream", checkInitialized, async (req, res) => {
     res.end();
   });
 
-  const orchestrator = new AgentOrchestrator(detector, (msg) => send("step", msg));
+  // Create per-request context (each request gets its own isolated context)
+  const context: import('./agent-orchestrator').VerificationContext = {
+    userId: (req as any).user?.id || req.headers['x-user-id'] as string || undefined,
+    userName: (req as any).user?.email || req.headers['x-user-email'] as string || undefined,
+    conversationId: req.query.conversationId as string || undefined,
+    requestId: crypto.randomUUID(),
+    timestamp: new Date().toISOString(),
+  };
+
+  const orchestrator = new AgentOrchestrator(detector, (msg) => send("step", msg), context);
 
   try {
-    const result = await orchestrator.verifyClaimAgentic(claim);
+    const result = await orchestrator.verifyClaimAgentic(claim, context);
     send("final", result);
   } catch (e: any) {
     send("error", { message: e?.message || "verification failed" });
@@ -205,9 +214,18 @@ app.post('/verify-claim-agentic', checkInitialized, verifyLimiter, async (req, r
 
     console.log(`🤖 API: Agentic verification for claim: "${claim.substring(0, 100)}..."`);
 
+    // Create per-request context (each request gets its own isolated context)
+    const context: import('./agent-orchestrator').VerificationContext = {
+      userId: (req as any).user?.id || req.headers['x-user-id'] as string || undefined,
+      userName: (req as any).user?.email || req.headers['x-user-email'] as string || undefined,
+      conversationId: req.body.conversationId || undefined,
+      requestId: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+    };
+
     const startTime = Date.now();
-    const orchestrator = new AgentOrchestrator(detector);
-    const result = await orchestrator.verifyClaimAgentic(claim.trim());
+    const orchestrator = new AgentOrchestrator(detector, undefined, context);
+    const result = await orchestrator.verifyClaimAgentic(claim.trim(), context);
     const processingTime = Date.now() - startTime;
 
     return res.json({

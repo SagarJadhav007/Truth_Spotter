@@ -37,6 +37,7 @@
     "express-rate-limit": "^7.4.0",
     "langchain": "^0.2.20",
     "serpapi": "^2.0.0",
+    "twilio": "^5.10.6",
     "typescript": "^5.5.4",
     "zod": "^3.25.76",
     "zod-to-json-schema": "^3.23.5"

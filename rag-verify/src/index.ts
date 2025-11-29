@@ -3,6 +3,8 @@ import cors from 'cors';
 import { MisinformationDetector, VerificationResult } from './detector';
 import rateLimit from 'express-rate-limit';
 import { AgentOrchestrator } from './agent-orchestrator';
+import whatsappRouter from "./routes/whatsapp"; // adjust path if needed
+
 
 console.log('🚀 Starting application...');
 
@@ -10,6 +12,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
+app.use('/',whatsappRouter)
+  
 app.use(cors({
   origin: ["http://localhost:8080", "https://truthspotter.vercel.app"], 
   methods: ["GET", "POST"],
